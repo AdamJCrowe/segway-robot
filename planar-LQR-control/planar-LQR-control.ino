@@ -1,4 +1,4 @@
-// --- Software to balance a segway robot using an LQR control system --- //
+// --- Software to balance a 2 wheel mobile robot using an LQR control system, only moving forwards and backwrads (planar) --- //
 
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
@@ -33,7 +33,7 @@ void setup(){
   TCCR4A = 0x81;  
   TCCR4B = 0x0B;  
 
-  // interrupts used to track encoder pulses (rising edges)
+  // interrupts used to track encoder pulses (use rising edges)
   attachInterrupt(digitalPinToInterrupt(2), encoderState, RISING); 
   attachInterrupt(digitalPinToInterrupt(3), encoderState, RISING); 
 
@@ -59,75 +59,36 @@ void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* y
 
 
 
-// control system settings
-const int kP = 100;//1400;  // PID coefficients
-const float kI = 0;//10
-const float kD = 0;//300; 
-float sensorError = 0;  
-int minSpeed = 26;  
+// LQR control matrix K gains (taken from simulation)
+const float K1 = -0.141;
+const float K2 = -0.165;
+const float K3 = -15.9;
+const float K4 = -1.32;
 
 // control system variables
-float desiredPitch = 0; // angle variable
-float currentError, totalError = 0, previousError = 0, errorRate = 0; // error variables, in radians
-unsigned long time, previousTime = 999999; // time variables, previousTime needs to start off large so D control initialy has little effect
-int speed;
+float sensorError = 0;  // IMU might be assembled at a slight angle
+unsigned long time, previousTime;
+float torque;   // desired motor torque
+float speedCalc = 255 / 0.8; // scale the motor torque to speed
+int speed;  // PWM duty cycle
+int minSpeed = 26;  // minimum PWM value
 
 // encoder variables
 int countPos=0, relativePos = 0, absolutePos = 0; // wheel position in encoder pulses
-int currentDirection, previousDirection; // wheel direction of rotation
+int currentDirection=2, previousDirection=-2; // wheel direction of rotation
 float wheelPos, wheelVel;
 float wheelPosCalc = 748 / 6.283; // constant used to turn encoder pulses to radians
 float wheelVelCalc = wheelPosCalc / 1000; // constant used to turn encoder pulses to rad/s
 
+int count=0;
+unsigned long startTime =millis(); 
+
+// interrupt which increments variable on the encoder's rising edges
 void encoderState(){
   countPos++;
 }
 
-void loop(){
-  // find pitch angle
-  do{
-    if (bno08x.getSensorEvent(&sensorValue)) {
-      switch (sensorValue.sensorId) {
-        case SH2_ARVR_STABILIZED_RV:
-          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-          break;
-      }
-    }
-  }
-  while (ypr.pitch == 0);
-
-
-  // capture data
-  time = millis();
-  relativePos = countPos;
-  countPos = 0;
-  
-  // calculate speed
-  currentError = desiredPitch - ypr.pitch + sensorError; 
-  totalError += currentError;
-  errorRate = (currentError - previousError) / (time - previousTime);
-  speed = (kP * currentError) + (kI * totalError) + (kD * errorRate);
-
-
-
-  // check if motors have changed direction, then update absolute position
-  if (previousDirection == currentDirection) {
-    if (currentDirection == 1){
-      absolutePos += relativePos;
-    }
-   else{
-      absolutePos -= relativePos;
-    }
-  }
-  else{
-    relativePos = 0;
-  }
-
-  // calculate wheel pos and speed
-  wheelPos = float(absolutePos) / wheelPosCalc;
-  wheelVel = float(relativePos) / (float(time - previousTime) * wheelVelCalc);
-
-  // set new speed value
+void updateMotors(){
   if (speed > minSpeed){
     currentDirection = -1;
     PORTJ = 0x03;  // D14 & D15 output high
@@ -160,29 +121,65 @@ void loop(){
     OCR3A = 0;
     OCR4A = 0;
   }
+}
 
-  // reset variable
+// check if motors have changed direction
+void motorDirection(){
+  if (previousDirection == currentDirection) {
+    if (currentDirection == 1){
+      absolutePos += relativePos;
+    }
+   else{
+      absolutePos -= relativePos;
+      relativePos = -relativePos;
+    }
+  }
+  else{
+    relativePos = 0;
+  }
+}
+
+
+void loop(){
+  // find pitch angle
+  do{
+    if (bno08x.getSensorEvent(&sensorValue)) {
+      switch (sensorValue.sensorId) {
+        case SH2_ARVR_STABILIZED_RV:
+          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+          break;
+      }
+    }
+  }
+  while ((ypr.pitch == 0) || (sensorValue.un.gyroscope.y == 0)); // wait until data is recieved
+
+  // capture data
+  time = millis();
+  relativePos = countPos;
+  countPos = 0;
+  
+
+  // check if motors have changed direction, then update absolute position
+  motorDirection();
+
+  // calculate wheel pos and speed
+  wheelPos = float(absolutePos) / wheelPosCalc;
+  wheelVel = float(relativePos) / (float(time - previousTime) * wheelVelCalc);
+
+  // calculate speed (PWM duty cycle) based on LQR control law
+  torque = 0*K1 * wheelPos + 0*K2 * wheelVel + K3 * (ypr.pitch-sensorError) + 0* K4 * sensorValue.un.gyroscope.y;
+  speed = torque * speedCalc;
+
+  // set new speed value and change motor direction if required
+  updateMotors();
+
+  // update variables
   previousDirection = currentDirection; 
-  previousError = currentError;
   previousTime = time;
 
-
-  Serial.println(wheelPos);
-  Serial.println(wheelVel);
-
-  /*Serial.print("Integrated Gyro - x: ");
-  Serial.print(sensorValue.un.gyroscope.x);
-  Serial.print(" y: ");
-  Serial.print(sensorValue.un.gyroscope.y);
-  Serial.print(" z: ");
-  Serial.println(sensorValue.un.gyroscope.z);*/
-
-  //Serial.println(currentError);
-
-  /*count++;
-  if (count >=10000){
-    Serial.println(timers-millis());
+  count++;
+  if (count >= 10000){
+    Serial.println(millis()-startTime);
     count=0;
-  }*/
-
+  }
 }

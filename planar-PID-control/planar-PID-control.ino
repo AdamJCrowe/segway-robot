@@ -1,4 +1,4 @@
-// --- Software to balance a segway robot using a PID control system --- //
+// --- Software to balance a 2 wheel mobile robot using a PID control system --- //
 
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
@@ -62,13 +62,51 @@ const int kP = 1000;  // PID coefficients
 const float kI = 10; 
 const float kD = 100; 
 float sensorError = -0.02;  
-int minspeed = 25 ;  
+int minSpeed = 25 ;  
 
 // control system variables
 float desiredPitch = 0; // angle variable
 float error, totalError = 0, previousError = 0; // error variables, in radians
 unsigned long time, previousTime, timeElapsed = 999999; // time variables, elapsedTime needs to be large so D control initialy has little effect
 int speed;
+
+
+
+// update motor speed and direction
+void updateMotors(){
+    if (speed > minSpeed){
+    PORTJ = 0x03;  // D14 & D15 output high
+    PORTH = 0x00;  // D16 & D17 output low
+    if (speed < 255){
+      OCR3A = speed;   // D5 PWM value
+      OCR4A = speed;   // D6 PWM value
+    }
+    else {
+      OCR3A = 0xFF;
+      OCR4A = 0xFF;
+    }
+  }
+  else if (speed < -minSpeed) {
+    PORTJ = 0x00;
+    PORTH = 0x03;    
+    if (speed > -255){
+      OCR3A = -speed;
+      OCR4A = -speed;
+    }
+    else {
+      OCR3A = 0xFF;
+      OCR4A = 0xFF;
+    }
+  }
+  else{ // not enough torque to drive the motors
+    PORTJ = 0x00;  
+    PORTH = 0x00;  
+    OCR3A = 0;
+    OCR4A = 0;
+  }
+}
+
+
 
 void loop(){
   // find pitch angle
@@ -83,43 +121,13 @@ void loop(){
   }
   while (ypr.pitch == 0);
 
-
-  // find new speed value
+  // find new speed (PWM duty cycle)
   error = desiredPitch - ypr.pitch + sensorError; 
   totalError += error;
   speed = (kP * error) + (kI * totalError) + (kD * (error - previousError) / timeElapsed);
-  Serial.println(error);
-  // set new speed value
-  if (speed > minspeed){
-    PORTJ = 0x03;  // D14 & D15 output high
-    PORTH = 0x00;  // D16 & D17 output low
-    if (speed < 255){
-      OCR3A = speed;   // D5 PWM value
-      OCR4A = speed;   // D6 PWM value
-    }
-    else {
-      OCR3A = 0xFF;
-      OCR4A = 0xFF;
-    }
-  }
-  else if (speed < -minspeed) {
-    PORTJ = 0x00;
-    PORTH = 0x03;    
-    if (speed > -255){
-      OCR3A = -speed;
-      OCR4A = -speed;
-    }
-    else {
-      OCR3A = 0xFF;
-      OCR4A = 0xFF;
-    }
-  }
-  else{
-    PORTJ = 0x00;  
-    PORTH = 0x00;  
-    OCR3A = 0;
-    OCR4A = 0;
-  }
+
+  // set new speed value and change motor direction if required
+  updateMotors();
   
   // update errors and times
   previousError = error;
