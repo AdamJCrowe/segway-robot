@@ -3,8 +3,7 @@
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
 
-// setup sensor
-// for SPI mode, we need a CS pin and reset
+// setup sensor, for SPI mode we need a CS pin and reset
 #define BNO08X_CS 10
 #define BNO08X_INT 9 
 #define BNO08X_RESET -1
@@ -18,6 +17,34 @@ long reportIntervalUs = 5000;
 struct euler_t {
   float pitch;
 } ypr;
+
+
+// control system constants
+const float K[] = {-0.141, -0.165, -15.9, -1.32}; // LQR control matrix, K, gains (taken from simulation)
+const float sensorError = 0;  // IMU might be assembled at a slight angle
+const float speedCalc = 255 / 0.8; // scale the motor torque to speed
+const int minSpeed = 26;  // minimum PWM value
+
+// control system variables
+unsigned long time, previousTime;
+float torque;   // desired motor torque
+int speed;  // PWM duty cycle
+
+// encoder constants
+const float wheelPosCalc = 748 / 6.283; // constant used to turn encoder pulses to radians
+const float wheelVelCalc = wheelPosCalc / 1000; // constant used to turn encoder pulses to rad/s
+
+// encoder variables
+int countPos=0, relativePos = 0, absolutePos = 0; // wheel position in encoder pulses
+int currentDirection=2, previousDirection=-2; // wheel direction of rotation
+float wheelPos, wheelVel;
+
+// function prototypes
+void updateMotors();
+void findMotorDirection();
+void encoderState();
+void quaternionToEuler(float, float, float, float, euler_t*, bool);
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t*, euler_t*, bool);
 
 
 
@@ -44,49 +71,45 @@ void setup(){
   while (! bno08x.enableReport(reportType, reportIntervalUs)) delay(10);
 }
 
-// pitch angle functions
-void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
-  float sqr = sq(qr);
-  float sqi = sq(qi);
-  float sqj = sq(qj);
-  float sqk = sq(qk);
-  ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+
+void loop(){
+  // find pitch angle
+  do{
+    if (bno08x.getSensorEvent(&sensorValue)) {
+      switch (sensorValue.sensorId) {
+        case SH2_ARVR_STABILIZED_RV:
+          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+          break;
+      }
+    }
+  }
+  while ((ypr.pitch == 0) || (sensorValue.un.gyroscope.y == 0)); // wait until data is recieved
+
+  // capture data
+  time = millis();
+  relativePos = countPos;
+  countPos = 0;
+
+  // check if motors have changed direction, then update absolute position
+  findMotorDirection();
+
+  // calculate wheel pos and speed
+  wheelPos = float(absolutePos) / wheelPosCalc;
+  wheelVel = float(relativePos) / (float(time - previousTime) * wheelVelCalc);
+
+  // calculate speed (PWM duty cycle) based on LQR control law
+  torque = 0*K[0] * wheelPos + 0*K[1] * wheelVel + K[2] * (ypr.pitch-sensorError) + 0*K[3] * sensorValue.un.gyroscope.y;
+  speed = torque * speedCalc;
+
+  // set new speed value and change motor direction if required
+  updateMotors();
+
+  // update variables
+  previousDirection = currentDirection; 
+  previousTime = time;
 }
 
-void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-    quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-}
 
-
-
-// LQR control matrix K gains (taken from simulation)
-const float K1 = -0.141;
-const float K2 = -0.165;
-const float K3 = -15.9;
-const float K4 = -1.32;
-
-// control system variables
-float sensorError = 0;  // IMU might be assembled at a slight angle
-unsigned long time, previousTime;
-float torque;   // desired motor torque
-float speedCalc = 255 / 0.8; // scale the motor torque to speed
-int speed;  // PWM duty cycle
-int minSpeed = 26;  // minimum PWM value
-
-// encoder variables
-int countPos=0, relativePos = 0, absolutePos = 0; // wheel position in encoder pulses
-int currentDirection=2, previousDirection=-2; // wheel direction of rotation
-float wheelPos, wheelVel;
-float wheelPosCalc = 748 / 6.283; // constant used to turn encoder pulses to radians
-float wheelVelCalc = wheelPosCalc / 1000; // constant used to turn encoder pulses to rad/s
-
-int count=0;
-unsigned long startTime =millis(); 
-
-// interrupt which increments variable on the encoder's rising edges
-void encoderState(){
-  countPos++;
-}
 
 void updateMotors(){
   if (speed > minSpeed){
@@ -123,8 +146,9 @@ void updateMotors(){
   }
 }
 
+
 // check if motors have changed direction
-void motorDirection(){
+void findMotorDirection(){
   if (previousDirection == currentDirection) {
     if (currentDirection == 1){
       absolutePos += relativePos;
@@ -140,46 +164,23 @@ void motorDirection(){
 }
 
 
-void loop(){
-  // find pitch angle
-  do{
-    if (bno08x.getSensorEvent(&sensorValue)) {
-      switch (sensorValue.sensorId) {
-        case SH2_ARVR_STABILIZED_RV:
-          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-          break;
-      }
-    }
-  }
-  while ((ypr.pitch == 0) || (sensorValue.un.gyroscope.y == 0)); // wait until data is recieved
+// interrupt, increments variable on the encoder's rising edges
+void encoderState(){
+  countPos++;
+}
 
-  // capture data
-  time = millis();
-  relativePos = countPos;
-  countPos = 0;
-  
 
-  // check if motors have changed direction, then update absolute position
-  motorDirection();
+// pitch angle function
+void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
+  float sqr = sq(qr);
+  float sqi = sq(qi);
+  float sqj = sq(qj);
+  float sqk = sq(qk);
+  ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+}
 
-  // calculate wheel pos and speed
-  wheelPos = float(absolutePos) / wheelPosCalc;
-  wheelVel = float(relativePos) / (float(time - previousTime) * wheelVelCalc);
 
-  // calculate speed (PWM duty cycle) based on LQR control law
-  torque = 0*K1 * wheelPos + 0*K2 * wheelVel + K3 * (ypr.pitch-sensorError) + 0* K4 * sensorValue.un.gyroscope.y;
-  speed = torque * speedCalc;
-
-  // set new speed value and change motor direction if required
-  updateMotors();
-
-  // update variables
-  previousDirection = currentDirection; 
-  previousTime = time;
-
-  count++;
-  if (count >= 10000){
-    Serial.println(millis()-startTime);
-    count=0;
-  }
+// convert from quaternion to euler angles
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+    quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
 }

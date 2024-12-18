@@ -3,8 +3,7 @@
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
 
-// setup sensor
-// for SPI mode, we need a CS pin and reset
+// setup sensor, for SPI mode we need a CS pin and reset
 #define BNO08X_CS 10
 #define BNO08X_INT 9 
 #define BNO08X_RESET -1
@@ -18,6 +17,21 @@ long reportIntervalUs = 5000;
 struct euler_t {
   float pitch;
 } ypr;
+
+// control system constants
+const int k[] = {1000, 5, 50};  // P, I and D gain constants
+const float sensorError = -0.02;  
+const int minSpeed = 25;  
+
+// control system variables
+float error, totalError = 0, previousError = 0; // error variables, in radians
+unsigned long time, previousTime, timeElapsed = 999999; // time variables, elapsedTime needs to be large so D control initialy has little effect
+int speed;
+
+// function prototypes
+void updateMotors();
+void quaternionToEuler(float, float, float, float, euler_t*, bool);
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t*, euler_t*, bool);
 
 
 
@@ -41,38 +55,37 @@ void setup(){
 }
 
 
+void loop(){
+  // find pitch angle
+  do{
+    if (bno08x.getSensorEvent(&sensorValue)) {
+      switch (sensorValue.sensorId) {
+        case SH2_ARVR_STABILIZED_RV:
+          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+          break;
+      }
+    }
+  }
+  while (ypr.pitch == 0);
 
-// pitch angle functions
-void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
-  float sqr = sq(qr);
-  float sqi = sq(qi);
-  float sqj = sq(qj);
-  float sqk = sq(qk);
-  ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+  // find new speed (PWM duty cycle)
+  error = - ypr.pitch + sensorError; 
+  totalError += error;
+  speed = (k[0] * error) + int(k[1] * totalError) + int(k[2] * (error - previousError) / timeElapsed);
+
+  // set new speed value and change motor direction if required
+  updateMotors();
+  
+  // update errors and times
+  previousError = error;
+  time = millis();
+  timeElapsed = time - previousTime;
+  previousTime = time;
 }
 
-void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-    quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-}
 
 
-
-// control system inputs
-const int kP = 1000;  // PID coefficients
-const float kI = 10; 
-const float kD = 100; 
-float sensorError = -0.02;  
-int minSpeed = 25 ;  
-
-// control system variables
-float desiredPitch = 0; // angle variable
-float error, totalError = 0, previousError = 0; // error variables, in radians
-unsigned long time, previousTime, timeElapsed = 999999; // time variables, elapsedTime needs to be large so D control initialy has little effect
-int speed;
-
-
-
-// update motor speed and direction
+// update motor direction and speed
 void updateMotors(){
     if (speed > minSpeed){
     PORTJ = 0x03;  // D14 & D15 output high
@@ -107,31 +120,17 @@ void updateMotors(){
 }
 
 
+// pitch angle functions
+void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
+  float sqr = sq(qr);
+  float sqi = sq(qi);
+  float sqj = sq(qj);
+  float sqk = sq(qk);
+  ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+}
 
-void loop(){
-  // find pitch angle
-  do{
-    if (bno08x.getSensorEvent(&sensorValue)) {
-      switch (sensorValue.sensorId) {
-        case SH2_ARVR_STABILIZED_RV:
-          quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-          break;
-      }
-    }
-  }
-  while (ypr.pitch == 0);
 
-  // find new speed (PWM duty cycle)
-  error = desiredPitch - ypr.pitch + sensorError; 
-  totalError += error;
-  speed = (kP * error) + (kI * totalError) + (kD * (error - previousError) / timeElapsed);
-
-  // set new speed value and change motor direction if required
-  updateMotors();
-  
-  // update errors and times
-  previousError = error;
-  time = millis();
-  timeElapsed = time - previousTime;
-  previousTime = time;
+// convert quaternion to euler angles
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+    quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
 }
