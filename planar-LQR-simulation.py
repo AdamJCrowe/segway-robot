@@ -151,6 +151,7 @@ def main():
     A, B = getMatrices(dynamics_constants)      # Calculate dynamics matrix (A), input matrix (B), length to body's CoM (L)
     
     K, S, E = control.lqr(A, B, Q_L, R_L)       # Calulate state feedback gain matrix (K), solution to Ricatti equation (S), eigenvalues (E)
+    K = np.array([[-0.01,-0.001,-1.2,-0.01]])       
     print("The control law is: ",K,"\n")
     
     control_check = assesControl(A,B,n)         # Asses the controllability of the matrix (if -1 is retruned the system can not be controlled)
